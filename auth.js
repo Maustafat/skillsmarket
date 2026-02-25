@@ -45,6 +45,9 @@ async function initAuth() {
   // Set up click interceptor for sign in/out buttons
   setupClickInterceptor(supabase);
 
+  // Expose showAuthModal globally so the app's old buttons can call it
+  window.showAuthModal = function(sb, mode) { showAuthModal(sb || supabase, mode); };
+
   // Inject modal styles
   injectStyles();
 }
