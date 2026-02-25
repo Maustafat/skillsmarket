@@ -6,14 +6,14 @@ const SUPABASE_URL = 'https://amjhxaautglxhwbuqlmg.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFtamh4YWF1dGdseGh3YnVxbG1nIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzIwMTIxNjMsImV4cCI6MjA4NzU4ODE2M30.kh1q1aYnoTw6v_Q5LRatr2K0DmD6FRXyWfWGwnPkcys';
 
 function loadApp() {
-  const script = document.createElement('script');
-  script.type = 'module';
-  script.src = 'app.js';
-  document.body.appendChild(script);
+  const s = document.createElement('script');
+  s.type = 'module';
+  s.src = 'app.js';
+  document.body.appendChild(s);
 }
 
 if (typeof window.supabase === 'undefined' || !window.supabase || !window.supabase.createClient) {
-  console.warn('Supabase not loaded — running in demo mode');
+  console.warn('[Auth] Supabase not loaded — demo mode');
   loadApp();
 } else {
   initAuth();
@@ -22,171 +22,166 @@ if (typeof window.supabase === 'undefined' || !window.supabase || !window.supaba
 async function initAuth() {
   const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
   window.__supabase = sb;
+  console.log('[Auth] Supabase connected');
 
-  // ---- Check existing session on page load ----
+  // Check existing session
   try {
     const { data: { session } } = await sb.auth.getSession();
     if (session && window.__SKILLS_DATA) {
-      const user = buildUserObject(session.user);
+      console.log('[Auth] Active session found for', session.user.email);
+      const user = buildUser(session.user);
       window.__SKILLS_DATA.currentUser = user;
       if (!window.__SKILLS_DATA.users.find(u => u.email === user.email)) {
         window.__SKILLS_DATA.users.push(user);
       }
     }
   } catch (err) {
-    console.warn('Auth session check failed:', err);
+    console.warn('[Auth] Session check failed:', err);
   }
 
-  // ---- Define the login handler that app.js calls ----
-  // d = {email, password, name} from React form state
-  // a = React dispatch function
-  // s = dialog setOpen function
-  window.__handleLogin = async function(d, a, s) {
-    const email = (d.email || '').trim();
-    const password = d.password || '';
-    const name = (d.name || '').trim();
+  // Load the React app (completely unmodified)
+  loadApp();
+  injectStyles();
 
-    if (!email) {
-      showToast('Please enter your email address.', 'error');
+  // --- Intercept the dialog submit button ---
+  // Strategy: Listen for clicks in CAPTURING phase.
+  // The submit button inside the dialog has class "w-full" and white text.
+  // Navbar buttons do NOT have "w-full".
+  document.addEventListener('click', async function(e) {
+    const btn = e.target.closest('button');
+    if (!btn) return;
+
+    const text = btn.textContent.trim();
+    const isWide = btn.classList.contains('w-full');
+    const isInDialog = !!btn.closest('[role="dialog"]');
+
+    // --- Submit button inside login/signup dialog ---
+    if ((isWide || isInDialog) && (text === 'Sign in' || text === 'Create account')) {
+      e.stopImmediatePropagation();
+      e.preventDefault();
+
+      // Read values from the React form inputs
+      const dialog = btn.closest('[role="dialog"]') || btn.parentElement.parentElement.parentElement;
+      const inputs = dialog ? dialog.querySelectorAll('input') : document.querySelectorAll('[role="dialog"] input, .fixed input');
+      
+      let email = '', password = '', name = '';
+      inputs.forEach(inp => {
+        if (inp.type === 'email') email = inp.value.trim();
+        else if (inp.type === 'password') password = inp.value;
+        else if (inp.type === 'text' && inp.placeholder && inp.placeholder.toLowerCase().includes('name')) name = inp.value.trim();
+        // Also check by placeholder
+        if (inp.placeholder === 'you@example.com') email = inp.value.trim();
+        if (inp.placeholder === '••••••••') password = inp.value;
+      });
+
+      console.log('[Auth] Intercepted submit:', text, '| email:', email);
+
+      if (!email) { showToast('Please enter your email.', 'error'); return; }
+      if (!password || password.length < 6) { showToast('Password must be at least 6 characters.', 'error'); return; }
+
+      // Disable button while loading
+      btn.disabled = true;
+      const origText = btn.textContent;
+      btn.textContent = 'Please wait...';
+
+      if (text === 'Create account') {
+        // --- SIGN UP ---
+        const { data, error } = await sb.auth.signUp({
+          email, password,
+          options: { data: { name: name || email.split('@')[0] } }
+        });
+        if (error) {
+          showToast(error.message, 'error');
+          btn.disabled = false; btn.textContent = origText;
+          return;
+        }
+        if (data.user && !data.session) {
+          showToast('Check your email to confirm your account!', 'success');
+          btn.disabled = false; btn.textContent = origText;
+          return;
+        }
+        if (data.session) {
+          showToast('Account created! Logging in...', 'success');
+          setTimeout(() => window.location.reload(), 500);
+          return;
+        }
+      } else {
+        // --- SIGN IN ---
+        const { data, error } = await sb.auth.signInWithPassword({ email, password });
+        if (error) {
+          let msg = 'Incorrect email or password.';
+          if (error.message.includes('not confirmed')) msg = 'Please confirm your email first.';
+          else if (!error.message.includes('Invalid login')) msg = error.message;
+          showToast(msg, 'error');
+          btn.disabled = false; btn.textContent = origText;
+          return;
+        }
+        if (data.session) {
+          showToast('Signed in!', 'success');
+          setTimeout(() => window.location.reload(), 500);
+          return;
+        }
+      }
+
+      btn.disabled = false; btn.textContent = origText;
       return;
     }
-    if (!password || password.length < 6) {
-      showToast('Password must be at least 6 characters.', 'error');
-      return;
-    }
 
-    // Try sign in first
-    const { data: signInData, error: signInError } = await sb.auth.signInWithPassword({
-      email, password
-    });
-
-    if (signInData.session) {
-      // Successful login — reload to pick up session
+    // --- Sign out button ---
+    if (text === 'Sign out') {
+      e.stopImmediatePropagation();
+      e.preventDefault();
+      console.log('[Auth] Signing out');
+      await sb.auth.signOut();
       window.location.reload();
       return;
     }
 
-    // If "Invalid login credentials", the user might not exist yet — try sign up
-    if (signInError && signInError.message.includes('Invalid login')) {
-      // Check if the user wants to register (name field filled = register mode)
-      if (name) {
-        const { data: signUpData, error: signUpError } = await sb.auth.signUp({
-          email, password,
-          options: { data: { name: name } }
-        });
-
-        if (signUpError) {
-          showToast(signUpError.message, 'error');
-          return;
-        }
-
-        if (signUpData.user && !signUpData.session) {
-          showToast('Check your email for a confirmation link!', 'success');
-          return;
-        }
-
-        if (signUpData.session) {
-          window.location.reload();
-          return;
-        }
-      } else {
-        showToast('Incorrect email or password.', 'error');
-        return;
-      }
-    }
-
-    // Other errors
-    if (signInError) {
-      if (signInError.message.includes('not confirmed')) {
-        showToast('Please confirm your email first. Check your inbox.', 'error');
-      } else {
-        showToast(signInError.message, 'error');
-      }
+    // --- "Sign in to Checkout" button ---
+    if (text === 'Sign in to Checkout') {
+      // Let it pass — the dialog will open, then we intercept the submit
       return;
     }
-  };
 
-  // ---- Load the app ----
-  loadApp();
-  injectStyles();
+  }, true); // CAPTURING PHASE — runs before React's handlers
 }
 
-// ---- Build user object matching the app's expected shape ----
-function buildUserObject(supaUser) {
-  const joinDate = new Date(supaUser.created_at).toLocaleDateString('en-US', {
-    month: 'short', year: 'numeric'
-  });
+function buildUser(su) {
   return {
-    id: supaUser.id,
-    name: supaUser.user_metadata?.name || supaUser.email.split('@')[0],
-    email: supaUser.email,
-    avatar: '😊',
-    bio: '',
-    joinDate: joinDate,
-    totalSales: 0,
-    totalEarnings: 0,
-    paymentMethod: null,
-    listings: []
+    id: su.id,
+    name: su.user_metadata?.name || su.email.split('@')[0],
+    email: su.email,
+    avatar: '😊', bio: '',
+    joinDate: new Date(su.created_at).toLocaleDateString('en-US', { month: 'short', year: 'numeric' }),
+    totalSales: 0, totalEarnings: 0, paymentMethod: null, listings: []
   };
 }
 
-// ---- Toast notification ----
 function showToast(message, type) {
-  // Remove existing toast
-  const existing = document.getElementById('sa-toast');
-  if (existing) existing.remove();
-
-  const toast = document.createElement('div');
-  toast.id = 'sa-toast';
-  toast.className = 'sa-toast sa-toast-' + type;
-  toast.textContent = message;
-  document.body.appendChild(toast);
-
-  // Animate in
-  requestAnimationFrame(() => toast.classList.add('sa-toast-show'));
-
-  // Auto remove after 4s
-  setTimeout(() => {
-    toast.classList.remove('sa-toast-show');
-    setTimeout(() => toast.remove(), 300);
-  }, 4000);
+  const old = document.getElementById('sa-toast');
+  if (old) old.remove();
+  const t = document.createElement('div');
+  t.id = 'sa-toast';
+  t.className = 'sa-toast sa-toast-' + type;
+  t.textContent = message;
+  document.body.appendChild(t);
+  requestAnimationFrame(() => t.classList.add('sa-toast-show'));
+  setTimeout(() => { t.classList.remove('sa-toast-show'); setTimeout(() => t.remove(), 300); }, 4000);
 }
 
-// ---- Styles ----
 function injectStyles() {
   const s = document.createElement('style');
   s.textContent = `
     .sa-toast {
-      position: fixed;
-      bottom: 24px;
-      left: 50%;
-      transform: translateX(-50%) translateY(20px);
-      padding: 12px 24px;
-      border-radius: 12px;
-      font-size: 14px;
-      font-weight: 500;
-      z-index: 99999;
-      opacity: 0;
-      transition: all 0.3s ease;
-      max-width: 400px;
-      text-align: center;
-      font-family: inherit;
-      box-shadow: 0 8px 24px rgba(0,0,0,0.15);
+      position:fixed; bottom:24px; left:50%; transform:translateX(-50%) translateY(20px);
+      padding:12px 24px; border-radius:12px; font-size:14px; font-weight:500;
+      z-index:99999; opacity:0; transition:all 0.3s ease;
+      max-width:400px; text-align:center; font-family:inherit;
+      box-shadow:0 8px 24px rgba(0,0,0,0.15);
     }
-    .sa-toast-show {
-      opacity: 1;
-      transform: translateX(-50%) translateY(0);
-    }
-    .sa-toast-error {
-      background: #fef2f2;
-      border: 1px solid #fecaca;
-      color: #b91c1c;
-    }
-    .sa-toast-success {
-      background: #f0fdf4;
-      border: 1px solid #bbf7d0;
-      color: #15803d;
-    }
+    .sa-toast-show { opacity:1; transform:translateX(-50%) translateY(0); }
+    .sa-toast-error { background:#fef2f2; border:1px solid #fecaca; color:#b91c1c; }
+    .sa-toast-success { background:#f0fdf4; border:1px solid #bbf7d0; color:#15803d; }
   `;
   document.head.appendChild(s);
 }
